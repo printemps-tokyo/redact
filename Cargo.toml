@@ -1,0 +1,31 @@
+[package]
+name = "redact"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Scrub secrets and PII from logs and text before sharing them. Fast, offline Rust CLI."
+authors = ["printemps.tokyo <develop@printemps.tokyo>"]
+repository = "https://github.com/printemps-tokyo/redact"
+homepage = "https://github.com/printemps-tokyo/redact"
+readme = "README.md"
+keywords = ["redact", "secrets", "logs", "security", "cli"]
+categories = ["command-line-utilities", "text-processing"]
+
+[[bin]]
+name = "redact"
+path = "src/main.rs"
+
+[lib]
+name = "redact"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+regex = "1"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"
