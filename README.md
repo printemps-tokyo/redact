@@ -33,7 +33,7 @@ cargo install --git https://github.com/printemps-tokyo/redact
 cargo install --path .
 ```
 
-Prebuilt binaries are attached to each [release](https://github.com/printemps-tokyo/redact/releases).
+Prebuilt binaries will be attached to each [release](https://github.com/printemps-tokyo/redact/releases) once a version is tagged.
 
 ## Usage
 
