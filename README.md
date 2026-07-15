@@ -71,10 +71,13 @@ redact --check build.log || echo "secrets detected in build.log"
 ## What it redacts
 
 On by default: PEM private-key blocks, JWTs, AWS access-key IDs, GitHub /
-Slack / Google / OpenAI key formats, `Bearer` tokens, credentials embedded in
-URLs (`scheme://user:pass@host`), `key: value` secrets (including env-var names
-like `DB_PASSWORD` and `AWS_SECRET_ACCESS_KEY`), email addresses, and IPv4
-addresses. IPv6 is available but off by default; enable it with `--types`.
+GitLab / Stripe / npm / SendGrid / Slack / Google / OpenAI key formats,
+`Bearer` tokens, credentials embedded in URLs (`scheme://user:pass@host`),
+`key: value` secrets (including env-var names like `DB_PASSWORD` and
+`AWS_SECRET_ACCESS_KEY`), email addresses, and IPv4 addresses. Stripe keys are
+caught in both live and test mode (`sk_live_`, `rk_live_`, `sk_test_`,
+`rk_test_`); test keys look identical to live ones and are still credentials.
+IPv6 is available but off by default; enable it with `--types`.
 
 A redacted value is replaced by the placeholder while a recognizable label is
 kept: `password=hunter2` becomes `password=[REDACTED]`, and

@@ -49,6 +49,39 @@ pub fn rule_specs() -> Vec<RuleSpec> {
             default: true,
         },
         RuleSpec {
+            // Covers Stripe secret (sk_) and restricted (rk_) keys, in both
+            // live and test mode. Test-mode keys are redacted too: they look
+            // identical to live keys and are still credentials. Stripe does
+            // not document an exact length, so a conservative lower bound of
+            // 20 characters after the prefix is used, matching common
+            // secret scanners.
+            name: "stripe-key",
+            pattern: r"\b[sr]k_(?:live|test)_[A-Za-z0-9]{20,}\b",
+            default: true,
+        },
+        RuleSpec {
+            // GitLab personal access tokens are 20 characters after the
+            // glpat- prefix; newer token formats can be longer, so an open
+            // upper bound is used.
+            name: "gitlab-token",
+            pattern: r"\bglpat-[A-Za-z0-9_-]{20,}\b",
+            default: true,
+        },
+        RuleSpec {
+            // npm granular/automation tokens: npm_ plus exactly 36
+            // alphanumeric characters.
+            name: "npm-token",
+            pattern: r"\bnpm_[A-Za-z0-9]{36}\b",
+            default: true,
+        },
+        RuleSpec {
+            // SendGrid API keys: SG. plus a 22-character key id, a dot, and
+            // a 43-character secret.
+            name: "sendgrid-key",
+            pattern: r"\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b",
+            default: true,
+        },
+        RuleSpec {
             name: "slack-token",
             pattern: r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b",
             default: true,
@@ -261,6 +294,51 @@ mod tests {
             redact_default("ghp_0123456789abcdefghijklmnopqrstuvwxyz").text,
             "[REDACTED]"
         );
+    }
+
+    #[test]
+    fn redacts_stripe_keys_live_and_test() {
+        assert_eq!(
+            redact_default("charge with sk_live_FAKEFAKEFAKEFAKEFAKE1234 now").text,
+            "charge with [REDACTED] now"
+        );
+        assert_eq!(
+            redact_default("restricted rk_live_FAKEFAKEFAKEFAKEFAKE1234").text,
+            "restricted [REDACTED]"
+        );
+        assert_eq!(
+            redact_default("test mode sk_test_FAKEFAKEFAKEFAKEFAKE1234").text,
+            "test mode [REDACTED]"
+        );
+    }
+
+    #[test]
+    fn redacts_gitlab_npm_and_sendgrid_tokens() {
+        assert_eq!(
+            redact_default("gitlab glpat-FAKEFAKEFAKEFAKEFAKE end").text,
+            "gitlab [REDACTED] end"
+        );
+        assert_eq!(
+            redact_default("npm npm_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE end").text,
+            "npm [REDACTED] end"
+        );
+        let sendgrid = "SG.FAKEFAKEFAKEFAKEFAKEfk.FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEfak";
+        assert_eq!(
+            redact_default(&format!("mail {sendgrid} end")).text,
+            "mail [REDACTED] end"
+        );
+    }
+
+    #[test]
+    fn leaves_stripe_lookalike_prose_untouched() {
+        // Words that merely contain the prefix, and too-short candidates,
+        // must not match.
+        let out = redact_default("risk_liveliness is a word, sk_live_short is too short");
+        assert_eq!(
+            out.text,
+            "risk_liveliness is a word, sk_live_short is too short"
+        );
+        assert_eq!(out.total(), 0);
     }
 
     #[test]
