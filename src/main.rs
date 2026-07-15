@@ -40,6 +40,10 @@ struct Cli {
     #[arg(long)]
     check: bool,
 
+    /// With --check, print only the summary, not the per-finding lines.
+    #[arg(long)]
+    quiet: bool,
+
     /// List the available rule names and exit.
     #[arg(long)]
     list_types: bool,
@@ -69,11 +73,22 @@ fn main() -> Result<()> {
     };
 
     let redactor = build_redactor(cli.types.as_deref(), &cli.add_pattern, cli.placeholder)?;
-    let outcome = redactor.redact(&input);
 
     if cli.check {
-        // Scanner mode: report to stderr, no scrubbed output, exit code signals
-        // whether anything was found.
+        // Scanner mode: report each finding to stderr as <file>:<line>: <rule>
+        // (never the matched value itself), then the per-rule counts; no
+        // scrubbed output is written and the exit code signals whether
+        // anything was found.
+        let outcome = redactor.check(&input);
+        let source = cli
+            .input
+            .as_ref()
+            .map_or_else(|| "-".to_string(), |p| p.display().to_string());
+        if !cli.quiet {
+            for f in &outcome.findings {
+                eprintln!("{source}:{}: {}", f.line, f.rule);
+            }
+        }
         for c in &outcome.counts {
             eprintln!("{}: {}", c.name, c.count);
         }
@@ -85,6 +100,8 @@ fn main() -> Result<()> {
         eprintln!("redact: no secrets found");
         return Ok(());
     }
+
+    let outcome = redactor.redact(&input);
 
     match &cli.output {
         Some(path) => std::fs::write(path, &outcome.text)

@@ -43,7 +43,8 @@ redact app.log -o clean.log      # scrub a file to a file
 cat err.log | redact | pbcopy    # scrub before pasting somewhere
 redact --types email,ipv4 notes.txt    # only some rule types
 redact --add-pattern '\bEMP-\d{6}\b' staff.log   # add a custom rule
-redact --check ci.log            # scan only: exit 1 if anything is found
+redact --check ci.log            # scan only: report file:line: rule, exit 1 on findings
+redact --check --quiet ci.log    # scan only, summary lines only
 redact --stats < app.log > clean.log   # also report counts on stderr
 redact --list-types              # show available rules and their defaults
 ```
@@ -56,16 +57,38 @@ redact --list-types              # show available rules and their defaults
 | `--add-pattern <regex>` | Add a custom regex rule (repeatable) |
 | `--placeholder <text>` | String to substitute (default: `[REDACTED]`) |
 | `--stats` | Print per-rule counts to stderr |
-| `--check` | Scan only; print findings and exit 1 if any are found |
+| `--check` | Scan only; report each finding as `file:line: rule` and exit 1 if any are found |
+| `--quiet` | With `--check`, print only the summary, not the per-finding lines |
 | `--list-types` | List available rules (and whether each is on by default) |
 
 ### Scanning in CI
 
-`--check` makes `redact` a leak detector: it reads the input, reports what it
-found on stderr, writes no scrubbed output, and exits `1` when anything matches.
+`--check` makes `redact` a leak detector: it reads the input, writes no
+scrubbed output, and exits `1` when anything matches. Each finding is reported
+to stderr as `<file>:<line>: <rule-name>` — the matched value itself is never
+printed, so the report is safe to keep in CI logs. Input read from stdin is
+reported as `-`, and a multi-line match (such as a PEM private-key block) is
+reported at the line where it starts. `--quiet` suppresses the per-finding
+lines and keeps just the per-rule counts and the summary.
 
-```bash
-redact --check build.log || echo "secrets detected in build.log"
+```console
+$ redact --check app.log
+app.log:3: email
+app.log:7: key-value
+app.log:12: private-key
+private-key: 1
+key-value: 1
+email: 1
+redact: found 3 potential secret(s)
+$ echo $?
+1
+```
+
+A GitHub Actions step:
+
+```yaml
+- name: Check the build log for leaked secrets
+  run: redact --check build.log
 ```
 
 ## What it redacts

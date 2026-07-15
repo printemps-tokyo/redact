@@ -180,6 +180,34 @@ impl RedactOutcome {
     }
 }
 
+/// A single potential secret located by [`Redactor::check`]. It carries the
+/// rule name and position only, never the matched text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Finding {
+    /// Name of the rule that matched.
+    pub rule: String,
+    /// 1-based line number where the match starts. A multi-line match (such
+    /// as a PEM private-key block) is reported at its first line.
+    pub line: usize,
+}
+
+/// The result of scanning text without rewriting it: located findings and
+/// per-rule counts.
+#[derive(Debug, Clone)]
+pub struct CheckOutcome {
+    /// Findings sorted by their position in the input.
+    pub findings: Vec<Finding>,
+    /// Per-rule match counts, in rule application order.
+    pub counts: Vec<RuleCount>,
+}
+
+impl CheckOutcome {
+    /// Total number of findings across all rules.
+    pub fn total(&self) -> usize {
+        self.findings.len()
+    }
+}
+
 /// An ordered set of rules and the placeholder they substitute.
 pub struct Redactor {
     rules: Vec<Rule>,
@@ -216,6 +244,52 @@ impl Redactor {
             }
         }
         RedactOutcome { text, counts }
+    }
+
+    /// Scan the input without rewriting it, locating every match.
+    ///
+    /// Rules are applied in order against the original text; a match whose
+    /// would-be-redacted span overlaps text already claimed by an earlier
+    /// rule is skipped, mirroring the sequential replacement performed by
+    /// [`Redactor::redact`]. Every rule sees the full text, so multi-line
+    /// rules (such as the `(?s)` private-key block) work unchanged and are
+    /// reported at the line where the match starts.
+    pub fn check(&self, input: &str) -> CheckOutcome {
+        let mut claimed: Vec<(usize, usize)> = Vec::new();
+        let mut hits: Vec<(usize, String)> = Vec::new();
+        let mut counts = Vec::new();
+        for rule in &self.rules {
+            let mut count = 0usize;
+            for caps in rule.regex.captures_iter(input) {
+                let m = caps.get(0).expect("group 0 always exists");
+                // The claimed span excludes the preserved keep/tail groups,
+                // matching what redact() actually replaces.
+                let start = caps.name("keep").map_or(m.start(), |k| k.end());
+                let end = caps.name("tail").map_or(m.end(), |t| t.start());
+                if claimed.iter().any(|&(s, e)| start < e && s < end) {
+                    continue;
+                }
+                claimed.push((start, end));
+                hits.push((m.start(), rule.name.clone()));
+                count += 1;
+            }
+            if count > 0 {
+                counts.push(RuleCount {
+                    name: rule.name.clone(),
+                    count,
+                });
+            }
+        }
+        hits.sort_by_key(|&(start, _)| start);
+        let mut findings = Vec::with_capacity(hits.len());
+        let mut line = 1usize;
+        let mut pos = 0usize;
+        for (start, rule) in hits {
+            line += input[pos..start].bytes().filter(|&b| b == b'\n').count();
+            pos = start;
+            findings.push(Finding { rule, line });
+        }
+        CheckOutcome { findings, counts }
     }
 }
 
@@ -412,6 +486,59 @@ mod tests {
             .unwrap()
             .redact("ref TOP-SECRET-42 end");
         assert_eq!(out.text, "ref [REDACTED] end");
+    }
+
+    fn check_default(input: &str) -> CheckOutcome {
+        build_redactor(None, &[], DEFAULT_PLACEHOLDER)
+            .unwrap()
+            .check(input)
+    }
+
+    #[test]
+    fn check_reports_line_numbers_across_multiple_lines() {
+        let out = check_default("clean line\na@b.com\nclean again\nkey AKIAIOSFODNN7EXAMPLE\n");
+        let got: Vec<(&str, usize)> = out
+            .findings
+            .iter()
+            .map(|f| (f.rule.as_str(), f.line))
+            .collect();
+        assert_eq!(got, vec![("email", 2), ("aws-access-key", 4)]);
+    }
+
+    #[test]
+    fn check_reports_one_finding_per_rule_on_the_same_line() {
+        let out = check_default("from a@b.com at 10.0.0.1\n");
+        let got: Vec<(&str, usize)> = out
+            .findings
+            .iter()
+            .map(|f| (f.rule.as_str(), f.line))
+            .collect();
+        assert_eq!(got, vec![("email", 1), ("ipv4", 1)]);
+    }
+
+    #[test]
+    fn check_reports_private_key_block_at_its_start_line() {
+        let pem = "before\n-----BEGIN RSA PRIVATE KEY-----\nMIIabc\nDEF==\n-----END RSA PRIVATE KEY-----\nafter a@b.com\n";
+        let out = check_default(pem);
+        let got: Vec<(&str, usize)> = out
+            .findings
+            .iter()
+            .map(|f| (f.rule.as_str(), f.line))
+            .collect();
+        // The block starts on line 2; the email keeps its original line 6
+        // because nothing is rewritten in check mode.
+        assert_eq!(got, vec![("private-key", 2), ("email", 6)]);
+    }
+
+    #[test]
+    fn check_counts_match_redact_counts() {
+        let input = "clone https://alice:s3cret@example.com/repo.git\npassword=hunter2 a@b.com\n";
+        let redactor = build_redactor(None, &[], DEFAULT_PLACEHOLDER).unwrap();
+        // The overlap-skip scan must agree with sequential redaction: the
+        // credential inside the URL is one url-credential hit, not also an
+        // email hit.
+        assert_eq!(redactor.check(input).counts, redactor.redact(input).counts);
+        assert_eq!(redactor.check(input).total(), 3);
     }
 
     #[test]
