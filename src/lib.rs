@@ -55,6 +55,12 @@ pub fn rule_specs() -> Vec<RuleSpec> {
             // not document an exact length, so a conservative lower bound of
             // 20 characters after the prefix is used, matching common
             // secret scanners.
+            //
+            // Tradeoff: \b treats `_` as a word character, so a key embedded
+            // in a snake_case identifier (e.g. `foo_sk_live_...` or a key
+            // immediately followed by `_`) escapes detection. The same
+            // property is what keeps prose like `risk_liveliness` from being
+            // flagged as a false positive.
             name: "stripe-key",
             pattern: r"\b[sr]k_(?:live|test)_[A-Za-z0-9]{20,}\b",
             default: true,
@@ -62,9 +68,11 @@ pub fn rule_specs() -> Vec<RuleSpec> {
         RuleSpec {
             // GitLab personal access tokens are 20 characters after the
             // glpat- prefix; newer token formats can be longer, so an open
-            // upper bound is used.
+            // upper bound is used. No trailing \b: the character class
+            // includes `-`, so a boundary there would strand a final dash
+            // outside the match and leave it behind after redaction.
             name: "gitlab-token",
-            pattern: r"\bglpat-[A-Za-z0-9_-]{20,}\b",
+            pattern: r"\bglpat-[A-Za-z0-9_-]{20,}",
             default: true,
         },
         RuleSpec {
@@ -76,9 +84,11 @@ pub fn rule_specs() -> Vec<RuleSpec> {
         },
         RuleSpec {
             // SendGrid API keys: SG. plus a 22-character key id, a dot, and
-            // a 43-character secret.
+            // a 43-character secret. No trailing \b: the segments are fixed
+            // length and the class includes `-`, so a boundary check would
+            // reject any key whose final secret character is a dash.
             name: "sendgrid-key",
-            pattern: r"\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b",
+            pattern: r"\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}",
             default: true,
         },
         RuleSpec {
@@ -326,6 +336,23 @@ mod tests {
         assert_eq!(
             redact_default(&format!("mail {sendgrid} end")).text,
             "mail [REDACTED] end"
+        );
+    }
+
+    #[test]
+    fn redacts_tokens_ending_in_a_dash() {
+        // The 43rd secret character of a SendGrid key can be a dash; the
+        // whole key must still be redacted.
+        let sendgrid = "SG.FAKEFAKEFAKEFAKEFAKEfk.FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEfa-";
+        assert_eq!(
+            redact_default(&format!("mail {sendgrid} end")).text,
+            "mail [REDACTED] end"
+        );
+        // A GitLab token ending in a dash must be consumed entirely, with no
+        // stray trailing dash left behind.
+        assert_eq!(
+            redact_default("gitlab glpat-FAKEFAKEFAKEFAKEFAK- end").text,
+            "gitlab [REDACTED] end"
         );
     }
 
