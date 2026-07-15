@@ -149,6 +149,20 @@ fn check_quiet_suppresses_per_finding_lines_but_keeps_the_summary() {
 }
 
 #[test]
+fn quiet_without_check_is_rejected() {
+    let path = write_input("quiet-alone", "contact a@b.com\n");
+    let out = bin()
+        .arg("--quiet")
+        .arg(&path)
+        .output()
+        .expect("failed to run redact");
+    let err = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(2), "stderr was:\n{err}");
+    assert!(err.contains("--check"), "stderr was:\n{err}");
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
 fn check_clean_input_exits_zero() {
     let path = write_input("clean", "the quick brown fox\n");
     let out = run_check(&path, &[]);

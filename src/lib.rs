@@ -250,30 +250,47 @@ impl Redactor {
     ///
     /// Rules are applied in order against the original text; a match whose
     /// would-be-redacted span overlaps text already claimed by an earlier
-    /// rule is skipped, mirroring the sequential replacement performed by
-    /// [`Redactor::redact`]. Every rule sees the full text, so multi-line
-    /// rules (such as the `(?s)` private-key block) work unchanged and are
-    /// reported at the line where the match starts.
+    /// rule is skipped, so each original secret is reported exactly once.
+    /// The counts can therefore be lower than the ones printed by
+    /// [`Redactor::redact`] with `--stats`: redact() substitutes rule by
+    /// rule, and a later rule may match text containing an already-inserted
+    /// placeholder (for example a `key-value` label whose value has become
+    /// `[REDACTED]`), which counts an extra hit that has no counterpart in
+    /// the original input. check() reflects the original text only. Every
+    /// rule sees the full text, so multi-line rules (such as the `(?s)`
+    /// private-key block) work unchanged and are reported at the line where
+    /// the match starts.
     pub fn check(&self, input: &str) -> CheckOutcome {
+        // Spans already claimed by earlier rules, sorted by start. They
+        // never overlap one another, so a candidate (start, end) overlaps
+        // some claimed span iff the last claimed span starting before `end`
+        // extends past `start` — one binary search per candidate.
         let mut claimed: Vec<(usize, usize)> = Vec::new();
         let mut hits: Vec<(usize, String)> = Vec::new();
         let mut counts = Vec::new();
         for rule in &self.rules {
             let mut count = 0usize;
+            // Matches of a single rule are non-overlapping and ascending,
+            // so they cannot collide with each other; they are collected
+            // here and merged into `claimed` once the rule is done, keeping
+            // the whole scan O(M log M) in the number of matches.
+            let mut accepted: Vec<(usize, usize)> = Vec::new();
             for caps in rule.regex.captures_iter(input) {
                 let m = caps.get(0).expect("group 0 always exists");
                 // The claimed span excludes the preserved keep/tail groups,
                 // matching what redact() actually replaces.
                 let start = caps.name("keep").map_or(m.start(), |k| k.end());
                 let end = caps.name("tail").map_or(m.end(), |t| t.start());
-                if claimed.iter().any(|&(s, e)| start < e && s < end) {
+                let idx = claimed.partition_point(|&(s, _)| s < end);
+                if idx > 0 && claimed[idx - 1].1 > start {
                     continue;
                 }
-                claimed.push((start, end));
+                accepted.push((start, end));
                 hits.push((m.start(), rule.name.clone()));
                 count += 1;
             }
             if count > 0 {
+                claimed = merge_sorted_spans(&claimed, &accepted);
                 counts.push(RuleCount {
                     name: rule.name.clone(),
                     count,
@@ -291,6 +308,26 @@ impl Redactor {
         }
         CheckOutcome { findings, counts }
     }
+}
+
+/// Merge two span lists that are each sorted by start into one sorted list.
+/// Used by [`Redactor::check`] to fold a rule's accepted matches into the
+/// claimed set in linear time.
+fn merge_sorted_spans(a: &[(usize, usize)], b: &[(usize, usize)]) -> Vec<(usize, usize)> {
+    let mut merged = Vec::with_capacity(a.len() + b.len());
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        if a[i].0 <= b[j].0 {
+            merged.push(a[i]);
+            i += 1;
+        } else {
+            merged.push(b[j]);
+            j += 1;
+        }
+    }
+    merged.extend_from_slice(&a[i..]);
+    merged.extend_from_slice(&b[j..]);
+    merged
 }
 
 /// Build a redactor from optional explicit type names plus extra custom
@@ -531,14 +568,57 @@ mod tests {
     }
 
     #[test]
-    fn check_counts_match_redact_counts() {
+    fn check_skips_spans_claimed_by_earlier_rules() {
         let input = "clone https://alice:s3cret@example.com/repo.git\npassword=hunter2 a@b.com\n";
         let redactor = build_redactor(None, &[], DEFAULT_PLACEHOLDER).unwrap();
-        // The overlap-skip scan must agree with sequential redaction: the
-        // credential inside the URL is one url-credential hit, not also an
-        // email hit.
+        // The credential inside the URL is one url-credential hit, not also
+        // an email hit. On input like this, where no placeholder re-matching
+        // occurs, check() and redact() agree.
         assert_eq!(redactor.check(input).counts, redactor.redact(input).counts);
         assert_eq!(redactor.check(input).total(), 3);
+    }
+
+    #[test]
+    fn check_counts_each_original_secret_once_even_when_redact_cascades() {
+        // openai-key claims the token first, so the key-value rule skips it
+        // in check(). redact(), however, substitutes sequentially: after the
+        // token becomes [REDACTED], the key-value rule matches the label
+        // with the placeholder as its value and counts a second hit. check()
+        // reports what is in the original text: one secret.
+        let input = "secret: sk-abcdefghijklmnopqrstuv\n";
+        let redactor = build_redactor(None, &[], DEFAULT_PLACEHOLDER).unwrap();
+        let checked = redactor.check(input);
+        assert_eq!(checked.total(), 1);
+        assert_eq!(checked.findings[0].rule, "openai-key");
+        assert_eq!(redactor.redact(input).total(), 2);
+    }
+
+    #[test]
+    fn check_overlap_skip_works_across_interleaved_rules() {
+        // Email and ipv4 claims interleave positionally, so the claimed set
+        // is built from out-of-order inserts across rules. The custom rule
+        // then re-matches both addresses (overlapping — must be skipped)
+        // and one clean region (must be accepted).
+        let input = "a@b.com 10.0.0.1\nc@d.com 10.0.0.2\nZONE plain nothing ZONE\n";
+        let extra = vec![r"10\.0\.0\.\d+|ZONE[^\n]*ZONE".to_string()];
+        let out = build_redactor(None, &extra, DEFAULT_PLACEHOLDER)
+            .unwrap()
+            .check(input);
+        let got: Vec<(&str, usize)> = out
+            .findings
+            .iter()
+            .map(|f| (f.rule.as_str(), f.line))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("email", 1),
+                ("ipv4", 1),
+                ("email", 2),
+                ("ipv4", 2),
+                ("custom1", 3),
+            ]
+        );
     }
 
     #[test]

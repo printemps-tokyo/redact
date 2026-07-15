@@ -41,7 +41,7 @@ struct Cli {
     check: bool,
 
     /// With --check, print only the summary, not the per-finding lines.
-    #[arg(long)]
+    #[arg(long, requires = "check")]
     quiet: bool,
 
     /// List the available rule names and exit.
