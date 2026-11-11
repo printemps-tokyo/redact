@@ -2,6 +2,7 @@
 name = "redact"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.85"
 license = "MIT"
 description = "Scrub secrets and PII from logs and text before sharing them. Fast, offline Rust CLI."
 authors = ["printemps.tokyo <develop@printemps.tokyo>"]
