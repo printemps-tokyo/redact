@@ -23,6 +23,9 @@ pub struct RuleSpec {
     pub name: &'static str,
     pub pattern: &'static str,
     pub default: bool,
+    /// A check a match must also pass (e.g. a check digit); the span checked
+    /// is what would be redacted, without the keep/tail groups.
+    pub validate: Option<fn(&str) -> bool>,
 }
 
 /// The catalog of built-in rules, in application order (most specific first).
@@ -32,21 +35,25 @@ pub fn rule_specs() -> Vec<RuleSpec> {
             name: "private-key",
             pattern: r"(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
             default: true,
+            validate: None,
         },
         RuleSpec {
             name: "jwt",
             pattern: r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+",
             default: true,
+            validate: None,
         },
         RuleSpec {
             name: "aws-access-key",
             pattern: r"\b(?:AKIA|ASIA|AGPA|AROA|AIDA)[A-Z0-9]{16}\b",
             default: true,
+            validate: None,
         },
         RuleSpec {
             name: "github-token",
             pattern: r"\bgh[posru]_[A-Za-z0-9]{36,}\b",
             default: true,
+            validate: None,
         },
         RuleSpec {
             // Covers Stripe secret (sk_) and restricted (rk_) keys, in both
@@ -64,6 +71,7 @@ pub fn rule_specs() -> Vec<RuleSpec> {
             name: "stripe-key",
             pattern: r"\b[sr]k_(?:live|test)_[A-Za-z0-9]{20,}\b",
             default: true,
+            validate: None,
         },
         RuleSpec {
             // GitLab personal access tokens are 20 characters after the
@@ -74,6 +82,7 @@ pub fn rule_specs() -> Vec<RuleSpec> {
             name: "gitlab-token",
             pattern: r"\bglpat-[A-Za-z0-9_-]{20,}",
             default: true,
+            validate: None,
         },
         RuleSpec {
             // npm granular/automation tokens: npm_ plus exactly 36
@@ -81,6 +90,7 @@ pub fn rule_specs() -> Vec<RuleSpec> {
             name: "npm-token",
             pattern: r"\bnpm_[A-Za-z0-9]{36}\b",
             default: true,
+            validate: None,
         },
         RuleSpec {
             // SendGrid API keys: SG. plus a 22-character key id, a dot, and
@@ -90,31 +100,37 @@ pub fn rule_specs() -> Vec<RuleSpec> {
             name: "sendgrid-key",
             pattern: r"\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}",
             default: true,
+            validate: None,
         },
         RuleSpec {
             name: "slack-token",
             pattern: r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b",
             default: true,
+            validate: None,
         },
         RuleSpec {
             name: "google-api-key",
             pattern: r"\bAIza[0-9A-Za-z_-]{35}\b",
             default: true,
+            validate: None,
         },
         RuleSpec {
             name: "openai-key",
             pattern: r"\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b",
             default: true,
+            validate: None,
         },
         RuleSpec {
             name: "bearer",
             pattern: r"(?P<keep>(?i:bearer)\s+)[A-Za-z0-9._~+/=-]{8,}",
             default: true,
+            validate: None,
         },
         RuleSpec {
             name: "url-credential",
             pattern: r"(?P<keep>[a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s:@]+:[^/\s@]*(?P<tail>@)",
             default: true,
+            validate: None,
         },
         RuleSpec {
             // The `(?:[a-z0-9]+_)*` prefix lets env-var style names like
@@ -124,29 +140,107 @@ pub fn rule_specs() -> Vec<RuleSpec> {
             name: "key-value",
             pattern: r#"(?i)(?P<keep>\b(?:[a-z0-9]+_)*(?:password|passwd|pass|secret|api[_-]?key|apikey|access[_-]?key|client[_-]?secret|private[_-]?key|auth[_-]?token|token)\b\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s"']+)"#,
             default: true,
+            validate: None,
         },
         RuleSpec {
             name: "email",
             pattern: r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
             default: true,
+            validate: None,
         },
         RuleSpec {
             name: "ipv4",
             pattern: r"\b(?:(?:25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\b",
             default: true,
+            validate: None,
         },
         RuleSpec {
             name: "ipv6",
             pattern: r"(?i)\b(?:[a-f0-9]{1,4}:){7}[a-f0-9]{1,4}\b",
             default: false,
+            validate: None,
+        },
+        RuleSpec {
+            // Japan's individual number (My Number): 12 digits, optionally
+            // grouped 4-4-4, whose last digit is the check digit the
+            // ordinance defines; numbers that fail it are left alone.
+            name: "my-number",
+            pattern: r"\b\d{4}[ -]?\d{4}[ -]?\d{4}\b",
+            default: true,
+            validate: Some(is_my_number),
+        },
+        RuleSpec {
+            // Japanese phone numbers: 10 digits (fixed line, 0 + area code
+            // + number) or 11 (mobile 070/080/090, IP 050, M2M 020), with
+            // hyphens, spaces or brackets, or +81 instead of the leading 0.
+            // Bare digits count only for 11-digit mobile/IP numbers, so ids
+            // and timestamps are not taken for phone numbers.
+            name: "jp-phone",
+            pattern: r"(?:\+81[ -]?|\(?\b0)\d{1,4}(?:[ -]|\)\s?|\(|\s?\()?\d{1,4}(?:[ -]|\))?\d{4}\b",
+            default: true,
+            validate: Some(is_jp_phone),
+        },
+        RuleSpec {
+            // Japanese postal codes: 〒 with or without a hyphen, or the
+            // hyphenated 123-4567 form. Off by default: a bare 123-4567 is
+            // often something else.
+            name: "jp-postal",
+            pattern: r"〒\s?\d{3}-?\d{4}\b|\b\d{3}-\d{4}\b",
+            default: false,
+            validate: None,
         },
     ]
+}
+
+/// Whether `s` is a My Number: 12 digits (spaces and hyphens ignored) whose
+/// check digit is right. The check digit is 11 minus the sum of Pn x Qn
+/// modulo 11 (0 when that remainder is 0 or 1), Pn being the nth digit of
+/// the other eleven counting from the lowest, Qn = n + 1 for n <= 6 and
+/// n - 5 above (Cabinet Office/MIC ordinance on the My Number Act, art. 5).
+pub fn is_my_number(s: &str) -> bool {
+    let digits: Vec<u32> = s.chars().filter_map(|c| c.to_digit(10)).collect();
+    if digits.len() != 12
+        || s.chars()
+            .any(|c| !(c.is_ascii_digit() || c == ' ' || c == '-'))
+    {
+        return false;
+    }
+    let sum: u32 = (1..=11)
+        .map(|n| {
+            let p = digits[11 - n];
+            let q = if n <= 6 { n as u32 + 1 } else { n as u32 - 5 };
+            p * q
+        })
+        .sum();
+    let r = sum % 11;
+    let check = if r <= 1 { 0 } else { 11 - r };
+    digits[11] == check
+}
+
+/// Whether `s` has the shape of a Japanese phone number (see the jp-phone
+/// rule): 10 digits starting 0 but not 00, or 11 starting 020, 050, 070,
+/// 080 or 090; bare digits only in the 11-digit case.
+pub fn is_jp_phone(s: &str) -> bool {
+    let national = match s.strip_prefix("+81") {
+        Some(rest) => format!("0{}", rest.trim_start_matches([' ', '-'])),
+        None => s.to_string(),
+    };
+    let digits: String = national.chars().filter(char::is_ascii_digit).collect();
+    let bare = !national.contains(|c: char| !c.is_ascii_digit()) && !s.starts_with("+81");
+    match digits.len() {
+        10 => !bare && digits.starts_with('0') && !digits.starts_with("00"),
+        11 => ["020", "050", "070", "080", "090"]
+            .iter()
+            .any(|p| digits.starts_with(p)),
+        _ => false,
+    }
 }
 
 /// A compiled redaction rule.
 pub struct Rule {
     pub name: String,
     regex: Regex,
+    validate: Option<fn(&str) -> bool>,
 }
 
 impl Rule {
@@ -155,7 +249,30 @@ impl Rule {
         let name = name.into();
         let regex =
             Regex::new(pattern).with_context(|| format!("invalid pattern for rule {name:?}"))?;
-        Ok(Rule { name, regex })
+        Ok(Rule {
+            name,
+            regex,
+            validate: None,
+        })
+    }
+
+    /// Compile a built-in rule, with its check.
+    pub fn from_spec(spec: &RuleSpec) -> Result<Rule> {
+        let mut rule = Rule::compile(spec.name, spec.pattern)?;
+        rule.validate = spec.validate;
+        Ok(rule)
+    }
+
+    /// The part of a match that is redacted (without keep/tail), as a range,
+    /// or None when the rule's check rejects it.
+    fn span(&self, caps: &Captures) -> Option<(usize, usize)> {
+        let m = caps.get(0).expect("group 0 always exists");
+        let start = caps.name("keep").map_or(m.start(), |k| k.end());
+        let end = caps.name("tail").map_or(m.end(), |t| t.start());
+        match self.validate {
+            Some(ok) if !ok(&m.as_str()[start - m.start()..end - m.start()]) => None,
+            _ => Some((start, end)),
+        }
     }
 }
 
@@ -225,15 +342,51 @@ impl Redactor {
 
     /// Apply every rule, in order, returning the scrubbed text and counts.
     pub fn redact(&self, input: &str) -> RedactOutcome {
+        let placeholder = self.placeholder.clone();
+        self.apply(input, |_, _| Some(placeholder.clone()))
+    }
+
+    /// Like [`Redactor::redact`], but each distinct value gets its own
+    /// numbered token (`[EMAIL_1]`, `[JP_PHONE_2]`, ...) recorded in `map`, so
+    /// [`TokenMap::restore`] can put the values back. A value already in the
+    /// map keeps its token.
+    pub fn redact_mapped(&self, input: &str, map: &mut TokenMap) -> RedactOutcome {
+        self.apply(input, |rule, value| {
+            // A token put in by an earlier rule (say an e-mail address that
+            // was a password's value) stays as it is.
+            if map.is_token(value) {
+                None
+            } else {
+                Some(map.token_for(rule, value))
+            }
+        })
+    }
+
+    /// Run the rules in order; `substitute(rule, value)` gives the text for
+    /// a match, or None to leave it.
+    fn apply(
+        &self,
+        input: &str,
+        mut substitute: impl FnMut(&str, &str) -> Option<String>,
+    ) -> RedactOutcome {
         let mut text = input.to_string();
         let mut counts = Vec::new();
         for rule in &self.rules {
             let mut count = 0usize;
             let replaced = rule.regex.replace_all(&text, |caps: &Captures| {
-                count += 1;
-                let pre = caps.name("keep").map_or("", |m| m.as_str());
-                let suf = caps.name("tail").map_or("", |m| m.as_str());
-                format!("{pre}{}{suf}", self.placeholder)
+                let m = caps.get(0).expect("group 0 always exists");
+                let whole = m.as_str().to_string();
+                let Some((start, end)) = rule.span(caps) else {
+                    return whole;
+                };
+                let (a, b) = (start - m.start(), end - m.start());
+                match substitute(&rule.name, &whole[a..b]) {
+                    Some(with) => {
+                        count += 1;
+                        format!("{}{with}{}", &whole[..a], &whole[b..])
+                    }
+                    None => whole,
+                }
             });
             text = replaced.into_owned();
             if count > 0 {
@@ -278,9 +431,11 @@ impl Redactor {
             for caps in rule.regex.captures_iter(input) {
                 let m = caps.get(0).expect("group 0 always exists");
                 // The claimed span excludes the preserved keep/tail groups,
-                // matching what redact() actually replaces.
-                let start = caps.name("keep").map_or(m.start(), |k| k.end());
-                let end = caps.name("tail").map_or(m.end(), |t| t.start());
+                // matching what redact() actually replaces; a match the
+                // rule's check rejects is no finding.
+                let Some((start, end)) = rule.span(&caps) else {
+                    continue;
+                };
                 let idx = claimed.partition_point(|&(s, _)| s < end);
                 if idx > 0 && claimed[idx - 1].1 > start {
                     continue;
@@ -307,6 +462,124 @@ impl Redactor {
             findings.push(Finding { rule, line });
         }
         CheckOutcome { findings, counts }
+    }
+}
+
+/// One token and the value it stands for.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MapEntry {
+    pub token: String,
+    pub rule: String,
+    pub value: String,
+}
+
+/// The tokens a mapped redaction used, for putting the values back. It is
+/// saved as JSON: `{"version": 1, "entries": [{"token", "rule", "value"}]}`.
+#[derive(Debug, Clone, Default)]
+pub struct TokenMap {
+    entries: Vec<MapEntry>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct MapFile {
+    version: u32,
+    entries: Vec<MapEntry>,
+}
+
+impl TokenMap {
+    /// Read a map saved by [`TokenMap::to_json`].
+    pub fn from_json(text: &str) -> Result<TokenMap> {
+        let file: MapFile = serde_json::from_str(text).context("not a redact map file")?;
+        if file.version != 1 {
+            anyhow::bail!("map file version {} is not supported", file.version);
+        }
+        Ok(TokenMap {
+            entries: file.entries,
+        })
+    }
+
+    pub fn to_json(&self) -> String {
+        let file = MapFile {
+            version: 1,
+            entries: self.entries.clone(),
+        };
+        serde_json::to_string_pretty(&file).expect("a map always serializes") + "\n"
+    }
+
+    pub fn entries(&self) -> &[MapEntry] {
+        &self.entries
+    }
+
+    fn is_token(&self, s: &str) -> bool {
+        self.entries.iter().any(|e| e.token == s)
+    }
+
+    /// The token for `value` found by `rule`, made up the first time.
+    pub fn token_for(&mut self, rule: &str, value: &str) -> String {
+        if let Some(e) = self
+            .entries
+            .iter()
+            .find(|e| e.rule == rule && e.value == value)
+        {
+            return e.token.clone();
+        }
+        let stem: String = rule
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_uppercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let n = self.entries.iter().filter(|e| e.rule == rule).count() + 1;
+        let mut token = format!("[{stem}_{n}]");
+        // Rules whose names differ only in punctuation share a stem; keep
+        // tokens unique all the same.
+        let mut k = n;
+        while self.is_token(&token) {
+            k += 1;
+            token = format!("[{stem}_{k}]");
+        }
+        self.entries.push(MapEntry {
+            token: token.clone(),
+            rule: rule.to_string(),
+            value: value.to_string(),
+        });
+        token
+    }
+
+    /// Put the values back: every token in `text` is replaced by its value.
+    /// Returns the text and how many tokens were replaced.
+    pub fn restore(&self, text: &str) -> (String, usize) {
+        let mut out = String::with_capacity(text.len());
+        let mut count = 0;
+        let mut rest = text;
+        while let Some(i) = rest.find('[') {
+            out.push_str(&rest[..i]);
+            let tail = &rest[i..];
+            let hit = tail.find(']').and_then(|j| {
+                let token = &tail[..=j];
+                self.entries
+                    .iter()
+                    .find(|e| e.token == token)
+                    .map(|e| (j, &e.value))
+            });
+            match hit {
+                Some((j, value)) => {
+                    out.push_str(value);
+                    count += 1;
+                    rest = &tail[j + 1..];
+                }
+                None => {
+                    out.push('[');
+                    rest = &tail[1..];
+                }
+            }
+        }
+        out.push_str(rest);
+        (out, count)
     }
 }
 
@@ -346,12 +619,12 @@ pub fn build_redactor(
                     .iter()
                     .find(|s| s.name == name)
                     .ok_or_else(|| anyhow!("unknown type {name:?} (see --list-types)"))?;
-                rules.push(Rule::compile(spec.name, spec.pattern)?);
+                rules.push(Rule::from_spec(spec)?);
             }
         }
         None => {
             for spec in specs.iter().filter(|s| s.default) {
-                rules.push(Rule::compile(spec.name, spec.pattern)?);
+                rules.push(Rule::from_spec(spec)?);
             }
         }
     }
@@ -625,5 +898,107 @@ mod tests {
     fn unknown_type_is_an_error() {
         let types = vec!["nope".to_string()];
         assert!(build_redactor(Some(&types), &[], DEFAULT_PLACEHOLDER).is_err());
+    }
+
+    #[test]
+    fn my_number_needs_its_check_digit() {
+        assert!(is_my_number("123456789018"));
+        assert!(is_my_number("1234 5678 9018"));
+        assert!(is_my_number("9876-5432-1093"));
+        assert!(!is_my_number("123456789017"));
+        assert!(!is_my_number("12345678901"));
+        let out = redact_default("id 1234-5678-9018 and order 1234-5678-9017").text;
+        assert_eq!(out, "id [REDACTED] and order 1234-5678-9017");
+    }
+
+    #[test]
+    fn japanese_phone_numbers_by_shape() {
+        for yes in [
+            "090-1234-5678",
+            "03-1234-5678",
+            "0466-12-3456",
+            "+81 90-1234-5678",
+            "+81-3-1234-5678",
+            "09012345678",
+            "(03) 1234-5678",
+            "050 1234 5678",
+        ] {
+            let out = redact_default(&format!("tel: {yes} ok")).text;
+            assert_eq!(out, "tel: [REDACTED] ok", "{yes}");
+        }
+        for no in [
+            "0312345678",
+            "2026-11-12",
+            "1234-5678",
+            "09-1234-567",
+            "0012-3456-7890",
+            "v1.2.3-0400-1234",
+        ] {
+            let out = redact_default(&format!("x {no} y")).text;
+            assert_eq!(out, format!("x {no} y"), "{no}");
+        }
+    }
+
+    #[test]
+    fn postal_codes_only_when_asked() {
+        assert_eq!(redact_default("〒100-0001 Tokyo").text, "〒100-0001 Tokyo");
+        let r = build_redactor(Some(&["jp-postal".to_string()]), &[], DEFAULT_PLACEHOLDER).unwrap();
+        assert_eq!(
+            r.redact("〒100-0001 / 〒1000001 / 530-0001").text,
+            "[REDACTED] / [REDACTED] / [REDACTED]"
+        );
+    }
+
+    #[test]
+    fn check_skips_matches_the_rule_rejects() {
+        let r = build_redactor(None, &[], DEFAULT_PLACEHOLDER).unwrap();
+        let found = r.check("a 1234-5678-9017\nb 1234-5678-9018\n");
+        assert_eq!(
+            found.findings,
+            vec![Finding {
+                rule: "my-number".into(),
+                line: 2
+            }]
+        );
+    }
+
+    #[test]
+    fn mapped_tokens_are_stable_and_restore_exactly() {
+        let r = build_redactor(None, &[], DEFAULT_PLACEHOLDER).unwrap();
+        let mut map = TokenMap::default();
+        let input = "a@example.com wrote to b@example.com and a@example.com; call 090-1234-5678\npassword=hunter2\n";
+        let out = r.redact_mapped(input, &mut map);
+        assert_eq!(
+            out.text,
+            "[EMAIL_1] wrote to [EMAIL_2] and [EMAIL_1]; call [JP_PHONE_1]\npassword=[KEY_VALUE_1]\n"
+        );
+        assert_eq!(map.restore(&out.text), (input.to_string(), 5));
+        // A second run reuses the tokens and numbers new values on.
+        let again = r.redact_mapped("b@example.com, c@example.com", &mut map);
+        assert_eq!(again.text, "[EMAIL_2], [EMAIL_3]");
+        // Round trip through JSON.
+        let back = TokenMap::from_json(&map.to_json()).unwrap();
+        assert_eq!(back.entries(), map.entries());
+        // Brackets that are not tokens are left alone.
+        assert_eq!(
+            map.restore("[x] [EMAIL_9] [EMAIL_3]").0,
+            "[x] [EMAIL_9] c@example.com"
+        );
+    }
+
+    #[test]
+    fn a_token_from_an_earlier_rule_is_not_mapped_again() {
+        let r = build_redactor(None, &[], DEFAULT_PLACEHOLDER).unwrap();
+        let mut map = TokenMap::default();
+        assert_eq!(
+            r.redact_mapped("me@example.com", &mut map).text,
+            "[EMAIL_1]"
+        );
+        // Text that already carries a token (masked once, then pasted into a
+        // config) is not masked over again.
+        let out = r.redact_mapped("secret=[EMAIL_1]", &mut map);
+        assert_eq!(out.text, "secret=[EMAIL_1]");
+        assert_eq!(map.entries().len(), 1);
+        assert!(TokenMap::from_json("{\"version\": 2, \"entries\": []}").is_err());
     }
 }

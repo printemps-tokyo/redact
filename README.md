@@ -47,6 +47,8 @@ redact --check ci.log            # scan only: report file:line: rule, exit 1 on 
 redact --check --quiet ci.log    # scan only, summary lines only
 redact --stats < app.log > clean.log   # also report counts on stderr
 redact --list-types              # show available rules and their defaults
+redact --map map.json < chat.txt > masked.txt      # reversible: [EMAIL_1], ...
+redact --restore --map map.json < answer.txt       # put the values back
 ```
 
 | Option | Description |
@@ -60,6 +62,8 @@ redact --list-types              # show available rules and their defaults
 | `--check` | Scan only; report each finding as `file:line: rule` and exit 1 if any are found |
 | `--quiet` | With `--check`, print only the summary, not the per-finding lines |
 | `--list-types` | List available rules (and whether each is on by default) |
+| `--map <file>` | Reversible masking: number each distinct value (`[EMAIL_1]`) and keep the token table in `file` |
+| `--restore` | With `--map`: replace the tokens in the input with their values |
 
 ### Scanning in CI
 
@@ -102,11 +106,39 @@ caught in both live and test mode (`sk_live_`, `rk_live_`, `sk_test_`,
 `rk_test_`); test keys look identical to live ones and are still credentials.
 IPv6 is available but off by default; enable it with `--types`.
 
+Japanese personal data is covered too:
+
+- `my-number` (on): the 12-digit individual number, also grouped 4-4-4 with
+  spaces or hyphens, only when its check digit is right (the formula in
+  article 5 of the Cabinet Office/MIC ordinance under the My Number Act), so
+  other 12-digit numbers are left alone.
+- `jp-phone` (on): 10-digit fixed-line numbers with separators
+  (`03-1234-5678`, `(03) 1234-5678`, `0466-12-3456`) and 11-digit mobile, IP
+  and M2M numbers (`090`, `080`, `070`, `050`, `020`), also as bare digits or
+  with `+81`. A bare 10-digit number is not taken for a phone number.
+- `jp-postal` (off): `〒100-0001`, `〒1000001` or `100-0001`; off by default
+  because a bare `123-4567` is often something else.
+
 A redacted value is replaced by the placeholder while a recognizable label is
 kept: `password=hunter2` becomes `password=[REDACTED]`, and
 `https://user:pw@host` becomes `https://[REDACTED]@host`.
 
 Run `redact --list-types` for the full list.
+
+## Reversible masking
+
+`--map map.json` replaces each distinct value with a numbered token instead of
+`[REDACTED]`: the first e-mail address is `[EMAIL_1]` wherever it appears, the
+next one `[EMAIL_2]`, a phone number `[JP_PHONE_1]`, and so on. The table of
+tokens and values is written to `map.json` (JSON, created owner-only and
+replaced in one step). An existing map is extended, so a value keeps its token
+across runs. Paste the masked text into an LLM or a ticket; when an answer
+comes back, `redact --restore --map map.json` puts the values back in place of
+the tokens it finds, leaving any other bracketed text alone.
+
+The map holds every value it masked: keep it private and delete it when you
+are done. Text that already contains something looking exactly like a token in
+the map (`[EMAIL_1]`) is restored too.
 
 ## Limitations
 
